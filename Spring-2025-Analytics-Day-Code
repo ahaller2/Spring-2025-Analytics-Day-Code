@@ -1,0 +1,700 @@
+# PYTHON CODE:
+# importing the data
+import pandas as pd
+
+mlb_stats = pd.read_excel("/content/drive/My Drive/2024_MLB_Batting_Stats.xlsx")
+
+print(mlb_stats.head())
+print(mlb_stats.info())
+
+##### DATA MANAGEMENT
+missing = mlb_stats.isnull().any().any()
+print(missing)
+
+position_counts = mlb_stats['Pos'].value_counts()
+print(position_counts)
+
+def categorize_pos(pos):
+    if pos == 'OF':
+        return 'OF'
+    elif pos in ['2B', 'SS']:
+        return 'MI'
+    elif pos in ['3B', '1B']:
+        return 'CI'
+    elif pos in ['DH', 'C']:
+        return 'C_DH'
+    else:
+        return 'Other'  # For any positions not explicitly mentioned
+
+# Create the new column
+mlb_stats['pos_cat'] = mlb_stats['Pos'].apply(categorize_pos)
+
+position_counts2 = mlb_stats['pos_cat'].value_counts()
+print(position_counts2)
+
+mlb_stats2 = mlb_stats[mlb_stats['pos_cat'] != 'C_DH']
+position_counts = mlb_stats2['pos_cat'].value_counts()
+print(position_counts)
+
+
+##### FIRST MANOVA ANALYSIS
+import pandas as pd
+import numpy as np
+from scipy.stats import shapiro, levene
+from statsmodels.multivariate.manova import MANOVA
+
+# Subset the data for the required variables
+data = mlb_stats_filtered[['pos_cat', 'HR', 'AVG', 'WAR', 'RBI']]
+
+# Normality test (Shapiro-Wilk)
+dependent_vars = ['HR', 'AVG', 'WAR', 'RBI']
+for var in dependent_vars:
+    stat, p_value = shapiro(data[var])
+    print(f"Shapiro-Wilk test for {var}:")
+    print(f"Statistic: {stat}, P-value: {p_value}")
+    print(f"Passes normality test: {p_value > 0.05}")
+    print()
+
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+from scipy.stats import boxcox
+import numpy as np
+
+# Log transformation
+data['AVG_log'] = np.log(data['AVG'])
+data['RBI_log'] = np.log(data['RBI'])
+
+# Square root transformation
+data['HR_sqrt'] = np.sqrt(data['HR'])
+
+# Box-Cox transformation
+data['WAR_shifted'] = data['WAR'] - data['WAR'].min() + 1e-6 
+data['WAR_bc'], lambda_val = boxcox(data['WAR_shifted'])
+
+
+# Normality test and QQ plots after transformation
+dependent_vars_transformed = ['AVG_log', 'RBI_log', 'HR_sqrt', 'WAR_bc']
+
+for var in dependent_vars_transformed:
+    stat, p_value = shapiro(data[var])
+    print(f"Shapiro-Wilk test for {var}:")
+    print(f"Statistic: {stat}, P-value: {p_value}")
+    print(f"Passes normality test: {p_value > 0.05}")
+    print()
+
+    # QQ plot
+    sm.qqplot(data[var], line='s')
+    plt.title(f'QQ Plot for {var}')
+    plt.show()
+
+def box_m_test(data, group_col):
+    # Get group labels and dependent variable names
+    groups = data[group_col].unique()
+    dependent_vars = data.drop(columns=[group_col]).columns
+
+    n_groups = len(groups)
+    n_vars = len(dependent_vars)
+
+    # Calculate pooled covariance matrix and individual group matrices
+    cov_matrices = []
+    group_sizes = []
+    pooled_cov = np.zeros((n_vars, n_vars))
+
+    for g in groups:
+        group_data = data[data[group_col] == g][dependent_vars]
+        cov_g = np.cov(group_data.T, bias=False)
+        n_g = len(group_data)
+        group_sizes.append(n_g)
+        cov_matrices.append(cov_g)
+        pooled_cov += (n_g - 1) * cov_g
+
+    pooled_cov /= (sum(group_sizes) - n_groups)
+
+    # Compute Box's M statistic
+    M = 0
+    for i in range(n_groups):
+        n_i = group_sizes[i]
+        cov_i = cov_matrices[i]
+        M += (n_i - 1) * (np.log(np.linalg.det(pooled_cov)) - np.log(np.linalg.det(cov_i)))
+
+    # Apply correction factor
+    c = ((2 * n_vars**2 + 3 * n_vars - 1) / (6 * (sum(group_sizes) - n_groups))) * \
+        (sum([1 / (n_i - 1) for n_i in group_sizes]) - (1 / (sum(group_sizes) - n_groups)))
+    X2 = M * (1 - c)
+    df = (n_groups - 1) * (n_vars * (n_vars + 1)) / 2
+    p_value = 1 - chi2.cdf(X2, df)
+
+    return {
+        "Box's M": M,
+        "Chi-square (adjusted)": X2,
+        "df": df,
+        "p-value": p_value
+    }
+
+# Keep only the transformed variables and grouping column
+boxm_data = data[['pos_cat', 'AVG_log', 'RBI_log', 'HR_sqrt', 'WAR_bc']].dropna()
+
+# Run the test
+result = box_m_test(boxm_data, group_col='pos_cat')
+
+# results
+box_m_stat = result["Box's M"]
+chi2_adj = result["Chi-square (adjusted)"]
+df_val = result["df"]
+p_val = result["p-value"]
+print(f"Box's M: {box_m_stat:.4f}")
+print(f"Chi-square (adjusted): {chi2_adj:.4f}")
+print(f"Degrees of freedom: {df_val:.0f}")
+print(f"p-value: {p_val:.6f}")
+
+if p_val < 0.05:
+    print("❌ Covariance matrices are significantly different — assumption VIOLATED.")
+else:
+    print("✅ Covariance matrices are not significantly different — assumption SATISFIED.")
+
+# Perform MANOVA on transformed variables
+maov = MANOVA.from_formula('AVG_log + RBI_log + HR_sqrt + WAR_bc ~ pos_cat', data=data)
+print(maov.mv_test())
+
+import statsmodels.formula.api as sm
+from statsmodels.stats.anova import anova_lm  # Import anova_lm directly
+
+# Perform one-way ANOVA for each dependent variable
+dependent_vars_transformed = ['AVG_log', 'RBI_log', 'HR_sqrt', 'WAR_bc']
+for var in dependent_vars_transformed:
+    model = sm.ols(formula=f'{var} ~ pos_cat', data=data).fit()
+    anova_table = anova_lm(model, typ=2)  # Call anova_lm directly
+    print(f"ANOVA table for {var}:")
+    print(anova_table)
+    print()
+
+# Create box plots for each dependent variable against pos_cat
+dependent_vars_transformed = ['AVG_log', 'RBI_log', 'HR_sqrt', 'WAR_bc']
+
+for var in dependent_vars_transformed:
+  plt.figure(figsize=(8, 6))
+  plt.boxplot([data[var][data['pos_cat'] == pos] for pos in data['pos_cat'].unique()],
+              labels=data['pos_cat'].unique())
+  plt.title(f'Box Plot of {var} by Position Category')
+  plt.xlabel('Position Category')
+  plt.ylabel(var)
+  plt.show()
+
+import pandas as pd
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+import matplotlib.pyplot as plt
+
+# Make sure the data has no missing values
+tukey_data = data[['pos_cat', 'RBI_log']].dropna()
+
+# Run Tukey's HSD test
+tukey_result = pairwise_tukeyhsd(
+    endog=tukey_data['RBI_log'],     
+    groups=tukey_data['pos_cat'],    
+    alpha=0.05                      
+)
+
+print(tukey_result.summary())
+
+tukey_result.plot_simultaneous()
+plt.title('Tukey HSD: RBI_log by Position')
+plt.xlabel('Mean Difference')
+plt.show()
+
+
+##### SECOND MANOVA
+import scipy.stats as stats
+import numpy as np
+
+# List of dependent variables to check
+dep_vars = ['Def', 'BB/K', 'Spd', 'BABIP']
+
+# Group data by position category
+grouped = mlb_stats2.groupby('pos_cat')
+
+# Loop through each group and perform Shapiro-Wilk test for each dependent variable
+for group_name, group_data in grouped:
+    print(f"Testing normality for position group: {group_name}")
+    for var in dep_vars:
+        stat, p_value = stats.shapiro(group_data[var])
+        print(f"{var}: W={stat:.3f}, p={p_value:.3f}")
+        if p_value < 0.05:
+            print(f"  → {var} is NOT normally distributed (p < 0.05)")
+        else:
+            print(f"  → {var} is normally distributed (p ≥ 0.05)")
+    print("-" * 40)
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+
+# Generate Q-Q plots for each variable within each pos_cat group
+for var in dep_vars:
+    plt.figure(figsize=(12, 6))
+    for i, (group_name, group_data) in enumerate(grouped):
+        plt.subplot(1, len(grouped), i + 1)
+        sm.qqplot(group_data[var], line='s', ax=plt.gca())
+        plt.title(f"{group_name} - {var}")
+    plt.tight_layout()
+    plt.show()
+
+from scipy.spatial.distance import mahalanobis
+from numpy.linalg import inv
+
+# Calculate Mahalanobis distance for each observation
+def mahalanobis_distance(df, dep_vars):
+    mean_vec = np.mean(df[dep_vars], axis=0)
+    cov_matrix = np.cov(df[dep_vars], rowvar=False)
+    inv_cov_matrix = inv(cov_matrix)
+
+    distances = []
+    for index, row in df[dep_vars].iterrows():
+        distances.append(mahalanobis(row, mean_vec, inv_cov_matrix))
+
+    return np.array(distances)
+
+# Apply Mahalanobis distance calculation
+mlb_stats['mahalanobis'] = mahalanobis_distance(mlb_stats, dep_vars)
+
+# Identify potential outliers (top 5%)
+threshold = np.percentile(mlb_stats['mahalanobis'], 95)
+outliers = mlb_stats[mlb_stats['mahalanobis'] > threshold]
+
+# Display outliers
+print("Potential Outliers (Top 5% of Mahalanobis Distance):")
+print(outliers[['Name', 'Pos', 'pos_cat', 'mahalanobis']].head())
+
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+from statsmodels.multivariate.manova import MANOVA
+
+# Function to compute Box's M test
+def box_m_test(df, dep_vars, group_col):
+    groups = df[group_col].unique()
+    cov_matrices = [df[df[group_col] == group][dep_vars].cov().values for group in groups]
+
+    pooled_cov = sum(cov_matrices) / len(groups)  # Average covariance matrix
+    inv_pooled_cov = np.linalg.inv(pooled_cov)  # Inverse of pooled covariance matrix
+
+    log_dets = [np.log(np.linalg.det(cov)) for cov in cov_matrices]
+    log_det_pooled = np.log(np.linalg.det(pooled_cov))
+
+    n = [len(df[df[group_col] == group]) for group in groups]
+    p = len(dep_vars)
+    k = len(groups)
+
+    # Compute Box's M statistic
+    M = (sum(n) - k) * log_det_pooled - sum([(n[i] - 1) * log_dets[i] for i in range(k)])
+    c = ((2 * p**2 + 3 * p - 1) * (k - 1)) / (6 * (p + 1) * (sum(n) - k))
+    chi_square = M * (1 - c)
+    df = (p * (p + 1) * (k - 1)) / 2
+    p_value = 1 - stats.chi2.cdf(chi_square, df)
+
+    return M, chi_square, df, p_value
+
+# Run Box's M test
+M_stat, chi2_stat, df, p_val = box_m_test(mlb_stats, dep_vars, 'pos_cat')
+
+# Print results
+print(f"Box's M Test Results:")
+print(f"M Statistic: {M_stat:.3f}")
+print(f"Chi-Square Statistic: {chi2_stat:.3f}")
+print(f"Degrees of Freedom: {df}")
+print(f"P-value: {p_val:.5f}")
+
+# Interpretation
+if p_val < 0.05:
+    print("→ The assumption of homogeneity of covariance matrices is VIOLATED (p < 0.05).")
+else:
+    print("→ The assumption of homogeneity of covariance matrices is MET (p ≥ 0.05).")
+
+#Checking for outliers using interquartile range
+## Function to detect outliers using IQR
+def detect_outliers_iqr(df, columns):
+    outliers = {}
+    for col in columns:
+        Q1 = df[col].quantile(0.25)
+        Q3 = df[col].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        outliers[col] = df[(df[col] < lower_bound) | (df[col] > upper_bound)][col]
+    return outliers
+
+outliers = detect_outliers_iqr(mlb_stats, ['Def', 'BB/K', 'Spd', 'BABIP'])
+for var, data in outliers.items():
+    print(f"Outliers in {var}:\n", data)
+
+## Using boxplots to visually check the outliers
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+plt.figure(figsize=(12, 6))
+for i, col in enumerate(['Def', 'BB/K', 'Spd', 'BABIP'], 1):
+    plt.subplot(2, 2, i)
+    sns.boxplot(y=mlb_stats[col])
+    plt.title(f"Boxplot of {col}")
+plt.tight_layout()
+plt.show()
+
+#Verifying the independent variables(pos_cat)
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+sns.countplot(x=mlb_stats2['pos_cat'])
+plt.title("Distribution of Position Categories")
+plt.show()
+
+print(mlb_stats2['pos_cat'].value_counts())
+
+## Log Transformation of the normality violation
+
+mlb_stats2['Spd_log'] = np.log(mlb_stats2['Spd'] + 1)  # Add 1 to avoid log(0)
+mlb_stats2['BB_K_log'] = np.log(mlb_stats2['BB/K'] + 1)
+
+## Re-running the Wilk test after applying the log transformation
+import scipy.stats as stats
+import numpy as np
+
+# List of transformed dependent variables to check
+transformed_dep_vars = ['Spd_log', 'BB_K_log']
+
+# Group data by position category
+grouped = mlb_stats2.groupby('pos_cat')
+
+# Loop through each group and perform Shapiro-Wilk test for transformed variables
+for group_name, group_data in grouped:
+    print(f"Testing normality for position group: {group_name}")
+    for var in transformed_dep_vars:
+        stat, p_value = stats.shapiro(group_data[var].dropna())  # Drop NaN values if any
+        print(f"{var}: W={stat:.3f}, p={p_value:.3f}")
+        if p_value < 0.05:
+            print(f"  → {var} is NOT normally distributed (p < 0.05)")
+        else:
+            print(f"  → {var} is normally distributed (p ≥ 0.05)")
+    print("-" * 40)
+
+## Visually checking if it will slightkly meet normality assumptiojn ###
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scipy.stats as stats
+
+# Create subplots for histograms and Q-Q plots
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+# Histogram for Spd_log in MI
+sns.histplot(mlb_stats2[mlb_stats2['pos_cat'] == 'MI']['Spd_log'].dropna(), kde=True, ax=axes[0, 0])
+axes[0, 0].set_title("Histogram of Spd_log (MI)")
+
+# Q-Q plot for Spd_log in MI
+stats.probplot(mlb_stats2[mlb_stats2['pos_cat'] == 'MI']['Spd_log'].dropna(), dist="norm", plot=axes[0, 1])
+axes[0, 1].set_title("Q-Q Plot of Spd_log (MI)")
+
+# Histogram for BB_K_log in OF
+sns.histplot(mlb_stats2[mlb_stats2['pos_cat'] == 'OF']['BB_K_log'].dropna(), kde=True, ax=axes[1, 0])
+axes[1, 0].set_title("Histogram of BB_K_log (OF)")
+
+# Q-Q plot for BB_K_log in OF
+stats.probplot(mlb_stats2[mlb_stats2['pos_cat'] == 'OF']['BB_K_log'].dropna(), dist="norm", plot=axes[1, 1])
+axes[1, 1].set_title("Q-Q Plot of BB_K_log (OF)")
+
+plt.tight_layout()
+plt.show()
+
+## Taking the square root transformation to improve normality ##
+mlb_stats2['Spd_sqrt'] = np.sqrt(mlb_stats2['Spd'])
+mlb_stats2['BB_K_sqrt'] = np.sqrt(mlb_stats2['BB/K'])
+
+## Re-running the Wilk test again after applying the square root transformation
+import scipy.stats as stats
+import numpy as np
+
+# List of transformed dependent variables to check
+transformed_dep_vars = ['Spd_sqrt', 'BB_K_sqrt']
+
+# Group data by position category
+grouped = mlb_stats2.groupby('pos_cat')
+
+# Loop through each group and perform Shapiro-Wilk test for transformed variables
+for group_name, group_data in grouped:
+    print(f"Testing normality for position group: {group_name}")
+    for var in transformed_dep_vars:
+        stat, p_value = stats.shapiro(group_data[var].dropna())  # Drop NaN values if any
+        print(f"{var}: W={stat:.3f}, p={p_value:.3f}")
+        if p_value < 0.05:
+            print(f"  → {var} is NOT normally distributed (p < 0.05)")
+        else:
+            print(f"  → {var} is normally distributed (p ≥ 0.05)")
+    print("-" * 40)
+
+import scipy.stats as stats
+
+# Function to compute Box's M test
+def box_m_test(df, dep_vars, group_col):
+    groups = df[group_col].unique()
+    cov_matrices = [df[df[group_col] == group][dep_vars].cov().values for group in groups]
+
+    pooled_cov = sum(cov_matrices) / len(groups)  # Average covariance matrix
+    inv_pooled_cov = np.linalg.inv(pooled_cov)  # Inverse of pooled covariance matrix
+
+    log_dets = [np.log(np.linalg.det(cov)) for cov in cov_matrices]
+    log_det_pooled = np.log(np.linalg.det(pooled_cov))
+
+    n = [len(df[df[group_col] == group]) for group in groups]
+    p = len(dep_vars)
+    k = len(groups)
+
+    # Compute Box's M statistic
+    M = (sum(n) - k) * log_det_pooled - sum([(n[i] - 1) * log_dets[i] for i in range(k)])
+    c = ((2 * p**2 + 3 * p - 1) * (k - 1)) / (6 * (p + 1) * (sum(n) - k))
+    chi_square = M * (1 - c)
+    df = (p * (p + 1) * (k - 1)) / 2
+    p_value = 1 - stats.chi2.cdf(chi_square, df)
+
+    return M, chi_square, df, p_value
+
+# Define transformed dependent variables
+transformed_dep_vars = ['Spd_sqrt', 'BB_K_sqrt', 'Def', 'BABIP']  # Keeping other MANOVA variables
+
+# Run Box's M test after transformation
+M_stat, chi2_stat, df, p_val = box_m_test(mlb_stats2, transformed_dep_vars, 'pos_cat')
+
+# Print results
+print(f"Box's M Test Results After Square Root Transformation:")
+print(f"M Statistic: {M_stat:.3f}")
+print(f"Chi-Square Statistic: {chi2_stat:.3f}")
+print(f"Degrees of Freedom: {df}")
+print(f"P-value: {p_val:.5f}")
+
+# Interpretation
+if p_val < 0.05:
+    print("→ The assumption of homogeneity of covariance matrices is VIOLATED (p < 0.05).")
+else:
+    print("→ The assumption of homogeneity of covariance matrices is MET (p ≥ 0.05).")
+
+# Run MANOVA
+# import statsmodels.api as sm
+# from statsmodels.multivariate.manova import MANOVA
+
+from statsmodels.multivariate.manova import MANOVA
+
+#Define the MANOVA model
+manova_model = MANOVA.from_formula(' + '.join(transformed_dep_vars) + ' ~ pos_cat', data=mlb_stats2)
+
+# Print the results
+print(manova_model.mv_test())
+
+## Post Hoc Analysis (Since MANOVA is Significant)
+
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+
+#list of dependent variables
+dep_var = ['Spd_sqrt', 'BB_K_sqrt', 'Def', 'BABIP']
+
+# Run ANOVA for each dependent variable
+for var in dep_vars:
+    model = ols(f"{var} ~ pos_cat", data=mlb_stats2).fit()
+    anova_table = sm.stats.anova_lm(model, typ=2)
+    print(f"ANOVA results for {var}:")
+    print(anova_table)
+    print("\n" + "-"*40 + "\n")
+
+#Running the Tukey's HSD Test
+
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+
+# List of significant variables to test
+sig_vars = ['Spd_sqrt', 'Def']
+
+for var in sig_vars:
+    print(f"Tukey's HSD Test for {var}:")
+
+    # Perform Tukey's test
+    tukey = pairwise_tukeyhsd(endog=mlb_stats2[var], groups=mlb_stats2['pos_cat'], alpha=0.05)
+
+    # Print results
+    print(tukey)
+    print("\n" + "-"*50 + "\n")
+
+## Visualizing the differences using boxplots for the speed and defense accross position groups
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+#set figure size
+plt.figure(figsize = (12, 6))
+
+#create boxplots for Spd_sqrt (speed) and Def (Defense)
+fig, axes = plt.subplots(1,2, figsize = (14,6))
+
+#Boxplot dor Spd_sqrt (Speed)
+sns.boxplot(x = 'pos_cat', y = 'Spd_sqrt', data = mlb_stats2, ax = axes[0])
+axes[0].set_title('Boxplot of Speed (Spd_sqrt) by Position Group')
+axes[0].set_xlabel('Position Group')
+axes[0].set_ylabel('Speed (Spd_sqrt)')
+
+
+#Boxplot for Def (Defense)
+sns.boxplot(x = 'pos_cat', y = 'Def', data = mlb_stats2, ax = axes[1])
+axes[1].set_title('Boxplot of Defense (Def) by Position Group')
+axes[1].set_xlabel('Position Group')
+axes[1].set_ylabel('Defense (Def)')
+
+#Display
+plt.tight_layout()
+plt.show()
+
+
+##### CLUSTER ANALYSIS
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+from sklearn.decomposition import PCA
+import seaborn as sns
+
+# Checking for multicollinearity
+# correlation matrix
+corr_matrix = mlb_stats2[['AVG', 'HR', 'WAR', 'RBI', 'Def', 'BB/K', 'Spd', 'BABIP']].corr()
+
+plt.figure(figsize=(10, 8))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f')
+plt.title("Correlation Matrix")
+plt.show()
+
+# Checking for outliers
+plt.figure(figsize=(4, 4))
+sns.boxplot(data=mlb_stats2['AVG'])
+plt.title("Boxplot for AVG")
+plt.xticks(rotation=45)
+plt.show()
+
+plt.figure(figsize=(4, 4))
+sns.boxplot(data=mlb_stats2['RBI'])
+plt.title("Boxplot for RBI")
+plt.xticks(rotation=45)
+plt.show()
+
+plt.figure(figsize=(4, 4))
+sns.boxplot(data=mlb_stats2['WAR'])
+plt.title("Boxplot for WAR")
+plt.xticks(rotation=45)
+plt.show()
+
+plt.figure(figsize=(4, 4))
+sns.boxplot(data=mlb_stats2['Def'])
+plt.title("Boxplot for Def")
+plt.xticks(rotation=45)
+plt.show()
+
+plt.figure(figsize=(4, 4))
+sns.boxplot(data=mlb_stats2['BB/K'])
+plt.title("Boxplot for BB/K")
+plt.xticks(rotation=45)
+plt.show()
+
+plt.figure(figsize=(4, 4))
+sns.boxplot(data=mlb_stats2['Spd'])
+plt.title("Boxplot for Spd")
+plt.xticks(rotation=45)
+plt.show()
+
+plt.figure(figsize=(4, 4))
+sns.boxplot(data=mlb_stats2['BABIP'])
+plt.title("Boxplot for BABIP")
+plt.xticks(rotation=45)
+plt.show()
+
+# Selecting numerical variables for clustering
+num_vars = ['AVG', 'RBI', 'WAR', 'Def', 'BB/K', 'Spd', 'BABIP']
+X = mlb_stats2[num_vars]
+X
+
+# Standardizing the numerical variables
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# deciding what k should be
+inertia = []
+sil_scores = []
+K_range = range(2, 11)
+
+for k in K_range:
+    kmeans = KMeans(n_clusters=k, random_state=432, n_init=10)
+    kmeans.fit(X_scaled)
+    inertia.append(kmeans.inertia_)
+    sil_scores.append(silhouette_score(X_scaled, kmeans.labels_))
+
+# Plot Elbow Method
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.plot(K_range, inertia, marker='o', linestyle='--')
+plt.xlabel("Number of Clusters (k)")
+plt.ylabel("Inertia")
+plt.title("Elbow Method")
+
+# Plot Silhouette Score
+plt.subplot(1, 2, 2)
+plt.plot(K_range, sil_scores, marker='o', linestyle='--', color='r')
+plt.xlabel("Number of Clusters (k)")
+plt.ylabel("Silhouette Score")
+plt.title("Silhouette Analysis")
+
+plt.show()
+
+# Run K-Means with k=3
+kmeans = KMeans(n_clusters=3, random_state=432, n_init=10)
+
+# Ensure that we're modifying the DataFrame properly to avoid the SettingWithCopyWarning
+mlb_stats2.loc[:, "Cluster"] = kmeans.fit_predict(X_scaled)
+print(mlb_stats2.head())
+
+# Checking cluster sizes
+cluster_counts = mlb_stats2['Cluster'].value_counts()
+print(cluster_counts)
+
+# Checking Assumptions of Linearity and Spherical Clusters
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+
+# PCA to reduce the data to 2 dimensions
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+# Plot
+plt.scatter(X_pca[:, 0], X_pca[:, 1])
+plt.title("PCA of the Data")
+plt.show()
+
+# Create a contingency table to compare clusters with position categories
+contingency_table = pd.crosstab(mlb_stats2["Cluster"], mlb_stats2["pos_cat"])
+
+print("\nCluster vs. Position Category Table:\n", contingency_table)
+
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+
+# Perform PCA to reduce the data to 2 dimensions
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+mlb_stats2.loc[:, "PCA1"] = X_pca[:, 0]
+mlb_stats2.loc[:, "PCA2"] = X_pca[:, 1]
+
+# Visualize the clusters
+plt.figure(figsize=(10, 6))
+plt.scatter(mlb_stats2["PCA1"], mlb_stats2["PCA2"], c=mlb_stats2["Cluster"], cmap="viridis", marker='o')
+plt.title("Cluster Visualization after PCA (2D)")
+plt.xlabel("PCA1")
+plt.ylabel("PCA2")
+plt.colorbar(label="Cluster")
+plt.show()
